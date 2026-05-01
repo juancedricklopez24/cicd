@@ -1,75 +1,56 @@
 pipeline {
     agent any
-
     environment {
         GIT_REPO_URL = 'https://github.com/juancedricklopez24/cicd.git'
         GIT_CREDENTIALS_ID = 'github-pat'
         GIT_BRANCH = 'main'
     }
-
     stages {
-
-        stage('Checkout SCM') {
+        stage('Checkout') {
             steps {
-                checkout scm: [
-                    $class: 'GitSCM',
-                    branches: [[name: "*/${env.GIT_BRANCH}"]],
-                    userRemoteConfigs: [[
-                        url: "${env.GIT_REPO_URL}",
-                        credentialsId: "${env.GIT_CREDENTIALS_ID}"
-                    ]]
-                ]
+                checkout([$class: 'GitSCM', branches: [[name: "*/${env.GIT_BRANCH}"]], userRemoteConfigs: [[url: "${env.GIT_REPO_URL}", credentialsId: "${env.GIT_CREDENTIALS_ID}"]]])
             }
         }
-
-        stage('Setup Python Environment') {
+        stage('Detect Change') {
+            steps {
+                script {
+                    def changed = sh(script: "git diff --name-only HEAD~1 HEAD | grep '.php' | head -n 1", returnStdout: true).trim()
+                    env.TARGET_PHP_FILE = changed ?: "index.php"
+                }
+            }
+        }
+        stage('Stage & Force Verbose Errors') {
             steps {
                 sh '''
-                echo "Setting up Python environment..."
-
-                python3 -m venv venv
-                . venv/bin/activate
-
-                pip install --upgrade pip
-                pip install -r requirements.txt
+                sudo mkdir -p /var/www/html/staging
+                sudo rsync -av --delete --exclude='venv/' --exclude='.git/' ./ /var/www/html/staging/
+                
+                # This forces PHP to show errors even if the main php.ini says no
+                echo "php_flag display_errors On" | sudo tee /var/www/html/staging/.htaccess
+                echo "php_value error_reporting 32767" | sudo tee -a /var/www/html/staging/.htaccess
+                
+                sudo chown -R www-data:www-data /var/www/html/staging
                 '''
             }
         }
-
-        stage('Run Selenium Test') {
+        stage('Run Strict Test') {
             steps {
                 sh '''
-                echo "Running Selenium tests..."
-
+                python3 -m venv venv
                 . venv/bin/activate
-                python test.py
+                pip install selenium
+                python3 test.py
+                '''
             }
         }
-
-        stage('Deploy to Apache') {
+        stage('Deploy') {
             steps {
                 sh '''
-                echo "Deploying FULL PHP project to Apache..."
-
-                # Sync all files (NEW + UPDATED + DELETED)
-                sudo rsync -av -o --delete ./ /var/www/html/
-
-                # Fix ownership
+                # Only runs if test.py exited with 0
+                sudo rsync -av --delete --exclude='venv/' --exclude='.git/' --exclude='staging/' ./ /var/www/html/
                 sudo chown -R www-data:www-data /var/www/html/
                 '''
             }
-        }
-    }
-
-    post {
-        success {
-            echo "CI/CD SUCCESS ✔ Deployment completed"
-        }
-        failure {
-            echo "CI/CD FAILED ❌ Check logs"
-        }
-        always {
-            cleanWs()
         }
     }
 }
